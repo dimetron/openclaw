@@ -252,7 +252,7 @@ docker build \
   --build-arg OPENCLAW_INSTALL_BROWSER=1 \
   --build-arg "OPENCLAW_DOCKER_APT_PACKAGES=${OPENCLAW_DOCKER_APT_PACKAGES}" \
   -t "$IMAGE_NAME" \
-  -f "$ROOT_DIR/Dockerfile" \
+  -f "$ROOT_DIR/Dockerfile.cust" \
   "$ROOT_DIR"
 
 
