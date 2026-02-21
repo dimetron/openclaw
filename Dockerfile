@@ -10,11 +10,11 @@ WORKDIR /app
 
 ARG OPENCLAW_DOCKER_APT_PACKAGES=""
 RUN if [ -n "$OPENCLAW_DOCKER_APT_PACKAGES" ]; then \
-      apt-get update && \
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $OPENCLAW_DOCKER_APT_PACKAGES && \
-      apt-get clean && \
-      rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
-    fi
+  apt-get update && \
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $OPENCLAW_DOCKER_APT_PACKAGES && \
+  apt-get clean && \
+  rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
+  fi
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY ui/package.json ./ui/package.json
@@ -29,20 +29,31 @@ RUN pnpm install --frozen-lockfile
 # Must run after pnpm install so playwright-core is available in node_modules.
 ARG OPENCLAW_INSTALL_BROWSER=""
 RUN if [ -n "$OPENCLAW_INSTALL_BROWSER" ]; then \
-      apt-get update && \
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb && \
-      node /app/node_modules/playwright-core/cli.js install --with-deps chromium && \
-      apt-get clean && \
-      rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
-    fi
+  apt-get update && \
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb && \
+  node /app/node_modules/playwright-core/cli.js install --with-deps chromium && \
+  apt-get clean && \
+  rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
+  fi
 
 COPY . .
-RUN pnpm build
+RUN --mount=type=cache,target=/root/.cache \
+  --mount=type=cache,target=/app/node_modules/.cache \
+  pnpm build
 # Force pnpm for UI build (Bun may fail on ARM/Synology architectures)
 ENV OPENCLAW_PREFER_PNPM=1
-RUN pnpm ui:build
+RUN --mount=type=cache,target=/root/.cache \
+  --mount=type=cache,target=/app/node_modules/.cache \
+  pnpm ui:build
 
 ENV NODE_ENV=production
+
+# Expose `openclaw` on PATH inside the container.
+RUN printf '%s\n' '#!/bin/sh' 'exec node /app/openclaw.mjs "$@"' > /usr/local/bin/openclaw \
+  && chmod +x /usr/local/bin/openclaw
+
+# install qmd
+RUN npm install -g @tobilu/qmd
 
 # Allow non-root user to write temp files during runtime/tests.
 RUN chown -R node:node /app
@@ -51,6 +62,76 @@ RUN chown -R node:node /app
 # The node:22-bookworm image includes a 'node' user (uid 1000)
 # This reduces the attack surface by preventing container escape via root privileges
 USER node
+
+# Install Homebrew (script hardcodes /home/linuxbrew/.linuxbrew on Linux;
+# temporarily switch to root to create the dir + linuxbrew user, then install)
+USER root
+RUN useradd -m -s /bin/bash linuxbrew \
+  && mkdir -p /home/linuxbrew/.linuxbrew \
+  && chown -R linuxbrew:linuxbrew /home/linuxbrew \
+  && su - linuxbrew -c "NONINTERACTIVE=1 CI=1 /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"" \
+  && chown -R node:node /home/linuxbrew/.linuxbrew
+ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
+
+#install arkade - require root privileges
+RUN curl -sLS https://get.arkade.dev | /bin/bash     \
+  &&    arkade get jq                              \
+  &&    arkade get yq                              \
+  &&    arkade get op                              \
+  &&    arkade get fzf                             \
+  &&    arkade get k9s                             \
+  &&    arkade get k3s                             \
+  &&    arkade get k3d                             \
+  &&    arkade get kind                            \
+  &&    arkade get helm                            \
+  &&    arkade get dagger                          \
+  &&    arkade get kubectl                         \
+  &&    arkade get kustomize                       \
+  &&    arkade get kubetail                        \
+  &&    arkade get argocd                          \
+  &&    arkade get istioctl                        \
+  &&    arkade get krew                            \
+  &&    arkade get crane                           \
+  &&    arkade get trivy                           \
+  &&    arkade get kubescape                       \
+  &&    arkade get vhs                             \
+  &&    arkade get atuin                           \
+  && mv /root/.arkade/bin/* /usr/local/bin/       \
+  && echo "arkade installation completed"
+
+USER node
+
+# Install uv + Python as non-root user in /app.
+ENV PATH="/home/node/.local/bin:${PATH}"
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+  && cd /app \
+  && uv python install 3.12
+
+#install go
+ENV NONINTERACTIVE=1 GIT_TERMINAL_PROMPT=0 HOMEBREW_NO_AUTO_UPDATE=1
+RUN --mount=type=cache,id=openclaw-homebrew-node-v1,target=/home/node/.cache/Homebrew,uid=1000,gid=1000 \
+  --mount=type=cache,id=openclaw-homebrew-linuxbrew-v1,target=/home/linuxbrew/.cache/Homebrew,uid=1000,gid=1000 \
+  export NONINTERACTIVE=1 GIT_TERMINAL_PROMPT=0 HOMEBREW_NO_AUTO_UPDATE=1 \
+  && brew install go \
+  && brew install fd \
+  && brew install ripgrep \
+  && brew install eza \
+  && brew install bat \
+  && brew install dust \
+  && brew install tokei \
+  && brew install delta \
+  && brew install hyperfine \
+  && brew install sd \
+  && brew install procs \
+  && brew install zoxide \
+  && brew install jq \
+  && brew install yq \
+  && brew install httpie \
+  && brew install btop \
+  && brew install nmap \
+  && brew install tmux \
+  && brew install neovim \
+  && brew install lazygit
 
 # Start gateway server with default config.
 # Binds to loopback (127.0.0.1) by default for security.
