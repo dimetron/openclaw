@@ -196,9 +196,6 @@ describe("createTelegramBot", () => {
     ).toBe("telegram:123");
   });
   it("routes callback_query payloads as messages and answers callbacks", async () => {
-    onSpy.mockReset();
-    replySpy.mockReset();
-
     createTelegramBot({ token: "tok" });
     const callbackHandler = onSpy.mock.calls.find((call) => call[0] === "callback_query")?.[1] as (
       ctx: Record<string, unknown>,
@@ -227,9 +224,6 @@ describe("createTelegramBot", () => {
   });
   it("wraps inbound message with Telegram envelope", async () => {
     await withEnvAsync({ TZ: "Europe/Vienna" }, async () => {
-      onSpy.mockReset();
-      replySpy.mockReset();
-
       createTelegramBot({ token: "tok" });
       expect(onSpy).toHaveBeenCalledWith("message", expect.any(Function));
       const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
@@ -284,14 +278,15 @@ describe("createTelegramBot", () => {
     ] as const;
 
     for (const testCase of cases) {
-      onSpy.mockReset();
-      sendMessageSpy.mockReset();
-      replySpy.mockReset();
+      onSpy.mockClear();
+      sendMessageSpy.mockClear();
+      replySpy.mockClear();
       loadConfig.mockReturnValue({
         channels: { telegram: { dmPolicy: "pairing" } },
       });
       readChannelAllowFromStore.mockResolvedValue([]);
-      upsertChannelPairingRequest.mockReset();
+      upsertChannelPairingRequest.mockClear();
+      upsertChannelPairingRequest.mockResolvedValue({ code: "PAIRCODE", created: true });
       for (const result of testCase.upsertResults) {
         upsertChannelPairingRequest.mockResolvedValueOnce(result);
       }
@@ -325,9 +320,6 @@ describe("createTelegramBot", () => {
     }
   });
   it("triggers typing cue via onReplyStart", async () => {
-    onSpy.mockReset();
-    sendChatActionSpy.mockReset();
-
     createTelegramBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
     await handler({
@@ -453,10 +445,84 @@ describe("createTelegramBot", () => {
     });
     expect(replySpy).toHaveBeenCalledTimes(1);
   });
-  it("allows distinct callback_query ids without update_id", async () => {
-    onSpy.mockReset();
-    replySpy.mockReset();
 
+  it("does not persist update offset past pending updates", async () => {
+    // For this test we need sequentialize(...) to behave like a normal middleware and call next().
+    sequentializeSpy.mockImplementationOnce(
+      () => async (_ctx: unknown, next: () => Promise<void>) => {
+        await next();
+      },
+    );
+
+    const onUpdateId = vi.fn();
+    loadConfig.mockReturnValue({
+      channels: { telegram: { dmPolicy: "open", allowFrom: ["*"] } },
+    });
+
+    createTelegramBot({
+      token: "tok",
+      updateOffset: {
+        lastUpdateId: 100,
+        onUpdateId,
+      },
+    });
+
+    type Middleware = (
+      ctx: Record<string, unknown>,
+      next: () => Promise<void>,
+    ) => Promise<void> | void;
+
+    const middlewares = middlewareUseSpy.mock.calls
+      .map((call) => call[0])
+      .filter((fn): fn is Middleware => typeof fn === "function");
+
+    const runMiddlewareChain = async (
+      ctx: Record<string, unknown>,
+      finalNext: () => Promise<void>,
+    ) => {
+      let idx = -1;
+      const dispatch = async (i: number): Promise<void> => {
+        if (i <= idx) {
+          throw new Error("middleware dispatch called multiple times");
+        }
+        idx = i;
+        const fn = middlewares[i];
+        if (!fn) {
+          await finalNext();
+          return;
+        }
+        await fn(ctx, async () => dispatch(i + 1));
+      };
+      await dispatch(0);
+    };
+
+    let releaseUpdate101: (() => void) | undefined;
+    const update101Gate = new Promise<void>((resolve) => {
+      releaseUpdate101 = resolve;
+    });
+
+    // Start processing update 101 but keep it pending (simulates an update queued behind sequentialize()).
+    const p101 = runMiddlewareChain({ update: { update_id: 101 } }, async () => update101Gate);
+    // Let update 101 enter the chain and mark itself pending before 102 completes.
+    await Promise.resolve();
+
+    // Complete update 102 while 101 is still pending. The persisted watermark must not jump to 102.
+    await runMiddlewareChain({ update: { update_id: 102 } }, async () => {});
+
+    const persistedValues = onUpdateId.mock.calls.map((call) => Number(call[0]));
+    const maxPersisted = persistedValues.length > 0 ? Math.max(...persistedValues) : -Infinity;
+    expect(maxPersisted).toBeLessThan(101);
+
+    releaseUpdate101?.();
+    await p101;
+
+    // Once the pending update finishes, the watermark can safely catch up.
+    const persistedAfterDrain = onUpdateId.mock.calls.map((call) => Number(call[0]));
+    const maxPersistedAfterDrain =
+      persistedAfterDrain.length > 0 ? Math.max(...persistedAfterDrain) : -Infinity;
+    expect(maxPersistedAfterDrain).toBe(102);
+  });
+  it("allows distinct callback_query ids without update_id", async () => {
     loadConfig.mockReturnValue({
       channels: {
         telegram: { dmPolicy: "open", allowFrom: ["*"] },
@@ -636,9 +702,6 @@ describe("createTelegramBot", () => {
   });
 
   it("routes DMs by telegram accountId binding", async () => {
-    onSpy.mockReset();
-    replySpy.mockReset();
-
     loadConfig.mockReturnValue({
       channels: {
         telegram: {
@@ -862,9 +925,6 @@ describe("createTelegramBot", () => {
   });
 
   it("sends GIF replies as animations", async () => {
-    onSpy.mockReset();
-    replySpy.mockReset();
-
     replySpy.mockResolvedValueOnce({
       text: "caption",
       mediaUrl: "https://example.com/fun",
@@ -901,11 +961,11 @@ describe("createTelegramBot", () => {
   });
 
   function resetHarnessSpies() {
-    onSpy.mockReset();
-    replySpy.mockReset();
-    sendMessageSpy.mockReset();
-    setMessageReactionSpy.mockReset();
-    setMyCommandsSpy.mockReset();
+    onSpy.mockClear();
+    replySpy.mockClear();
+    sendMessageSpy.mockClear();
+    setMessageReactionSpy.mockClear();
+    setMyCommandsSpy.mockClear();
   }
   function getMessageHandler() {
     createTelegramBot({ token: "tok" });
@@ -1187,8 +1247,6 @@ describe("createTelegramBot", () => {
     }
   });
   it("allows control commands with TG-prefixed groupAllowFrom entries", async () => {
-    onSpy.mockReset();
-    replySpy.mockReset();
     loadConfig.mockReturnValue({
       channels: {
         telegram: {
@@ -1233,7 +1291,7 @@ describe("createTelegramBot", () => {
 
     for (const testCase of forumCases) {
       resetHarnessSpies();
-      sendChatActionSpy.mockReset();
+      sendChatActionSpy.mockClear();
       loadConfig.mockReturnValue({
         channels: {
           telegram: {
@@ -1417,9 +1475,6 @@ describe("createTelegramBot", () => {
     }
   });
   it("sends replies without native reply threading", async () => {
-    onSpy.mockReset();
-    sendMessageSpy.mockReset();
-    replySpy.mockReset();
     replySpy.mockResolvedValue({ text: "a".repeat(4500) });
 
     createTelegramBot({ token: "tok" });
@@ -1443,9 +1498,6 @@ describe("createTelegramBot", () => {
     }
   });
   it("prefixes final replies with responsePrefix", async () => {
-    onSpy.mockReset();
-    sendMessageSpy.mockReset();
-    replySpy.mockReset();
     replySpy.mockResolvedValue({ text: "final reply" });
     loadConfig.mockReturnValue({
       channels: {
@@ -1474,9 +1526,9 @@ describe("createTelegramBot", () => {
       ["first", 101],
       ["all", 102],
     ] as const) {
-      onSpy.mockReset();
-      sendMessageSpy.mockReset();
-      replySpy.mockReset();
+      onSpy.mockClear();
+      sendMessageSpy.mockClear();
+      replySpy.mockClear();
       replySpy.mockResolvedValue({
         text: "a".repeat(4500),
         replyToId: String(messageId),
@@ -1504,8 +1556,6 @@ describe("createTelegramBot", () => {
     }
   });
   it("honors routed group activation from session store", async () => {
-    onSpy.mockReset();
-    replySpy.mockReset();
     const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-telegram-"));
     const storePath = path.join(storeDir, "sessions.json");
     fs.writeFileSync(
@@ -1551,9 +1601,6 @@ describe("createTelegramBot", () => {
   });
 
   it("applies topic skill filters and system prompts", async () => {
-    onSpy.mockReset();
-    replySpy.mockReset();
-
     loadConfig.mockReturnValue({
       channels: {
         telegram: {
@@ -1587,10 +1634,7 @@ describe("createTelegramBot", () => {
     expect(opts?.skillFilter).toEqual([]);
   });
   it("threads native command replies inside topics", async () => {
-    onSpy.mockReset();
-    sendMessageSpy.mockReset();
-    commandSpy.mockReset();
-    replySpy.mockReset();
+    commandSpy.mockClear();
     replySpy.mockResolvedValue({ text: "response" });
 
     loadConfig.mockReturnValue({
@@ -1620,10 +1664,7 @@ describe("createTelegramBot", () => {
     );
   });
   it("skips tool summaries for native slash commands", async () => {
-    onSpy.mockReset();
-    sendMessageSpy.mockReset();
-    commandSpy.mockReset();
-    replySpy.mockReset();
+    commandSpy.mockClear();
     replySpy.mockImplementation(async (_ctx, opts) => {
       await opts?.onToolResult?.({ text: "tool update" });
       return { text: "final reply" };
@@ -1662,9 +1703,6 @@ describe("createTelegramBot", () => {
     expect(sendMessageSpy.mock.calls[0]?.[1]).toContain("final reply");
   });
   it("buffers channel_post media groups and processes them together", async () => {
-    onSpy.mockReset();
-    replySpy.mockReset();
-
     loadConfig.mockReturnValue({
       channels: {
         telegram: {
@@ -1739,9 +1777,6 @@ describe("createTelegramBot", () => {
     }
   });
   it("coalesces channel_post near-limit text fragments into one message", async () => {
-    onSpy.mockReset();
-    replySpy.mockReset();
-
     loadConfig.mockReturnValue({
       channels: {
         telegram: {
@@ -1800,9 +1835,6 @@ describe("createTelegramBot", () => {
     }
   });
   it("drops oversized channel_post media instead of dispatching a placeholder message", async () => {
-    onSpy.mockReset();
-    replySpy.mockReset();
-
     loadConfig.mockReturnValue({
       channels: {
         telegram: {
