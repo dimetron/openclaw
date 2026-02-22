@@ -69,9 +69,21 @@ fi
 
 OPENCLAW_CONFIG_DIR="${OPENCLAW_CONFIG_DIR:-$HOME/.openclaw}"
 OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-$HOME/.openclaw/workspace}"
+if [[ -z "${OPENCLAW_DOCKER_SOCKET:-}" ]]; then
+  if [[ -S "$HOME/.docker/run/docker.sock" ]]; then
+    OPENCLAW_DOCKER_SOCKET="$HOME/.docker/run/docker.sock"
+  else
+    OPENCLAW_DOCKER_SOCKET="/var/run/docker.sock"
+  fi
+fi
+if [[ -z "${OPENCLAW_DOCKER_API_VERSION:-}" ]]; then
+  # Keep default above modern daemon minimums (e.g. Docker Desktop requires >=1.44).
+  OPENCLAW_DOCKER_API_VERSION="1.44"
+fi
 
 validate_mount_path_value "OPENCLAW_CONFIG_DIR" "$OPENCLAW_CONFIG_DIR"
 validate_mount_path_value "OPENCLAW_WORKSPACE_DIR" "$OPENCLAW_WORKSPACE_DIR"
+validate_mount_path_value "OPENCLAW_DOCKER_SOCKET" "$OPENCLAW_DOCKER_SOCKET"
 if [[ -n "$HOME_VOLUME_NAME" ]]; then
   if [[ "$HOME_VOLUME_NAME" == *"/"* ]]; then
     validate_mount_path_value "OPENCLAW_HOME_VOLUME" "$HOME_VOLUME_NAME"
@@ -93,6 +105,8 @@ export OPENCLAW_BRIDGE_PORT="${OPENCLAW_BRIDGE_PORT:-18790}"
 export OPENCLAW_GATEWAY_BIND="${OPENCLAW_GATEWAY_BIND:-lan}"
 export OPENCLAW_IMAGE="$IMAGE_NAME"
 export OPENCLAW_DOCKER_APT_PACKAGES="${OPENCLAW_DOCKER_APT_PACKAGES:-}"
+export OPENCLAW_DOCKER_SOCKET
+export OPENCLAW_DOCKER_API_VERSION="${OPENCLAW_DOCKER_API_VERSION:-}"
 export OPENCLAW_EXTRA_MOUNTS="$EXTRA_MOUNTS"
 export OPENCLAW_HOME_VOLUME="$HOME_VOLUME_NAME"
 
@@ -245,7 +259,9 @@ upsert_env "$ENV_FILE" \
   OPENCLAW_IMAGE \
   OPENCLAW_EXTRA_MOUNTS \
   OPENCLAW_HOME_VOLUME \
-  OPENCLAW_DOCKER_APT_PACKAGES
+  OPENCLAW_DOCKER_APT_PACKAGES \
+  OPENCLAW_DOCKER_SOCKET \
+  OPENCLAW_DOCKER_API_VERSION
 
 echo "==> Building Docker image: $IMAGE_NAME"
 docker build \
